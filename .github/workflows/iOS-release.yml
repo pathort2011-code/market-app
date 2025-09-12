@@ -1,0 +1,124 @@
+name: iOS Release Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'App Version (e.g., 5.1.0)'
+        required: true
+        default: '5.1.0'
+      build_number:
+        description: 'Build Number'
+        required: true
+        default: '15'
+      deploy_to_store:
+        description: 'Submit to App Store for Review'
+        type: boolean
+        default: false
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        
+    - name: Install Dependencies
+      run: npm ci
+      
+    - name: Update iOS Version
+      run: |
+        /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ github.event.inputs.version }}" ios/App/App/Info.plist
+        /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.event.inputs.build_number }}" ios/App/App/Info.plist
+        
+    - name: Sync Capacitor
+      run: npx cap sync ios
+      
+    - name: Import Code Signing Certificates
+      uses: apple-actions/import-codesign-certs@v2
+      with:
+        p12-file-base64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+        p12-password: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        
+    - name: Import Provisioning Profile
+      uses: apple-actions/download-provisioning-profiles@v2
+      id: provisioning
+      with:
+        bundle-id: com.marketgrow.app
+        profile-type: IOS_APP_STORE
+        issuer-id: ${{ secrets.APPSTORE_ISSUER_ID }}
+        api-key-id: ${{ secrets.APPSTORE_KEY_ID }}
+        api-private-key: ${{ secrets.APPSTORE_PRIVATE_KEY }}
+        
+    - name: Build iOS Archive
+      run: |
+        xcodebuild archive \
+          -workspace ios/App/App.xcworkspace \
+          -scheme App \
+          -configuration Release \
+          -destination generic/platform=iOS \
+          -archivePath ios/App/MarketGrow.xcarchive \
+          CODE_SIGN_STYLE=Manual \
+          DEVELOPMENT_TEAM="${{ secrets.IOS_TEAM_ID }}" \
+          CODE_SIGN_IDENTITY="Apple Distribution" \
+          PROVISIONING_PROFILE="${{ steps.provisioning.outputs.profile-uuid }}"
+          
+    - name: Export IPA
+      run: |
+        cat > ios/App/ExportOptions.plist << EOF
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>method</key>
+            <string>app-store</string>
+            <key>teamID</key>
+            <string>${{ secrets.IOS_TEAM_ID }}</string>
+            <key>uploadBitcode</key>
+            <false/>
+            <key>uploadSymbols</key>
+            <true/>
+            <key>compileBitcode</key>
+            <false/>
+        </dict>
+        </plist>
+        EOF
+        
+        xcodebuild -exportArchive \
+          -archivePath ios/App/MarketGrow.xcarchive \
+          -exportPath ios/App/export \
+          -exportOptionsPlist ios/App/ExportOptions.plist
+          
+    - name: Rename IPA with Version
+      run: |
+        cp ios/App/export/App.ipa MarketGrow-v${{ github.event.inputs.version }}-Build${{ github.event.inputs.build_number }}.ipa
+        
+    - name: Upload IPA Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: MarketGrow-iOS-Release
+        path: MarketGrow-v${{ github.event.inputs.version }}-Build${{ github.event.inputs.build_number }}.ipa
+        
+    - name: Upload to TestFlight
+      if: ${{ github.event.inputs.deploy_to_store == 'true' }}
+      uses: apple-actions/upload-testflight@v1
+      with:
+        app-path: MarketGrow-v${{ github.event.inputs.version }}-Build${{ github.event.inputs.build_number }}.ipa
+        issuer-id: ${{ secrets.APPSTORE_ISSUER_ID }}
+        api-key-id: ${{ secrets.APPSTORE_KEY_ID }}
+        api-private-key: ${{ secrets.APPSTORE_PRIVATE_KEY }}
+          
+    - name: Submission Complete
+      if: ${{ github.event.inputs.deploy_to_store == 'true' }}
+      run: |
+        echo "🚀 IPA uploaded to TestFlight successfully!"
+        echo "📱 Go to App Store Connect to submit for review:"
+        echo "🔗 https://appstoreconnect.apple.com"
+        echo "⚡ Ready for same-week submission!"
