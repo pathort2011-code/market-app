@@ -1,0 +1,81 @@
+name: Android Release Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_code:
+        description: 'Version Code (must be higher than previous)'
+        required: true
+        default: '15'
+      deploy_to_store:
+        description: 'Deploy to Google Play Store'
+        type: boolean
+        default: false
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        
+    - name: Setup Java 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+        
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+      
+    - name: Install Dependencies
+      run: npm ci
+      
+    - name: Update Version Code
+      run: |
+        sed -i "s/versionCode [0-9]*/versionCode ${{ github.event.inputs.version_code }}/" android/app/build.gradle
+        cat android/app/build.gradle | grep versionCode
+        
+    - name: Sync Capacitor
+      run: npx cap sync android
+      
+    - name: Create Keystore File
+      run: |
+        echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/app/release-key.keystore
+        
+    - name: Build Android AAB
+      working-directory: android
+      run: |
+        ./gradlew bundleRelease \
+          -PMYAPP_UPLOAD_STORE_FILE=app/release-key.keystore \
+          -PMYAPP_UPLOAD_STORE_PASSWORD="${{ secrets.KEYSTORE_PASSWORD }}" \
+          -PMYAPP_UPLOAD_KEY_ALIAS="${{ secrets.KEY_ALIAS }}" \
+          -PMYAPP_UPLOAD_KEY_PASSWORD="${{ secrets.KEY_PASSWORD }}"
+          
+    - name: Rename AAB with Version
+      run: |
+        cp android/app/build/outputs/bundle/release/app-release.aab \
+           MarketGrow-v5.1-VersionCode${{ github.event.inputs.version_code }}-RELEASE.aab
+           
+    - name: Upload AAB Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: MarketGrow-Android-Release
+        path: MarketGrow-v5.1-VersionCode${{ github.event.inputs.version_code }}-RELEASE.aab
+        
+    - name: Deploy to Google Play Store
+      if: ${{ github.event.inputs.deploy_to_store == 'true' }}
+      uses: r0adkll/upload-google-play@v1
+      with:
+        serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT }}
+        packageName: com.marketgrow.app
+        releaseFiles: MarketGrow-v5.1-VersionCode${{ github.event.inputs.version_code }}-RELEASE.aab
+        track: internal
+        status: completed
